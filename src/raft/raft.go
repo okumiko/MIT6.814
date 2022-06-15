@@ -15,28 +15,6 @@ import (
 	"sync/atomic"
 )
 
-// Possible values for StateType.
-const (
-	StateFollower StateType = iota
-	StateCandidate
-	StateLeader
-	StatePreCandidate
-	numStates
-)
-
-// StateType represents the role of a node in a cluster.
-type StateType uint32
-
-var stmap = [...]string{
-	"StateFollower",
-	"StateCandidate",
-	"StateLeader",
-	"StatePreCandidate",
-}
-
-func (st StateType) String() string {
-	return stmap[uint32(st)]
-}
 
 type ApplyMsg struct {
 	CommandValid bool
@@ -50,6 +28,7 @@ type ApplyMsg struct {
 	SnapshotIndex int
 }
 
+type
 //raft节点
 type Raft struct {
 	mu        sync.Mutex          // Lock to protect shared access to this peer's state
@@ -60,18 +39,18 @@ type Raft struct {
 
 	//所有服务器上的持久化状态，在回复RPC之前更新持久化存储
 	//term的主要作用是用于识别出过时信息。比如网络分区时，某一分区的server的term滞后，分区恢复后就能根据term值识别出过期的server，过期的server也可以根据收到的较大的term更新自己的term。
-	currentTerm uint32     //服务器知道的最近任期，当服务器启动时初始化为0
-	votedFor    int        //当前任期中，该服务器给投过票的candidateId，如果没有则为null
-	logs        []LogEntry //日志条目；每一条包含了状态机指令以及该条目被leader收到时的任期号
+	currentTerm int      //服务器知道的最近任期，当服务器启动时初始化为0
+	votedFor    int         //当前任期中，该服务器给投过票的candidateId，如果没有则为null
+	logs        []*LogEntry //日志条目；每一条包含了状态机指令以及该条目被leader收到时的任期号
 	// 第一个条目是一个虚拟条目，其中包含 LastSnapshotTerm、LastSnapshotIndex 和 nil 命令
 
 	//所有服务器上的易失性状态
-	commitIndex uint32 //已知被提交的最高日志条目索引号，一开始是0，单调递增
-	lastApplied uint32 //应用到状态机的最高日志条目索引号，一开始为0，单调递增
+	commitIndex int //已知被提交的最高日志条目索引号，一开始是0，单调递增
+	lastApplied int //应用到状态机的最高日志条目索引号，一开始为0，单调递增
 
 	//leader上的易失性状态，在选举之后重新初始化
-	nextIndex  []uint32 //针对所有的服务器，内容是需要发送给每个服务器下一条日志条目索引号(初始化为leader的最高索引号+1)
-	matchIndex []uint32 //针对所有的服务器，内容是已知要复制到每个服务器上的最高日志条目号，初始化为0，单调递增
+	nextIndex  []int //针对所有的服务器，内容是需要发送给每个服务器下一条日志条目索引号(初始化为leader的最高索引号+1)
+	matchIndex []int //针对所有的服务器，内容是已知要复制到每个服务器上的最高日志条目号，初始化为0，单调递增
 
 	applyCh        chan ApplyMsg
 	applyCond      *sync.Cond
@@ -103,8 +82,8 @@ func Make(peers []*labrpc.ClientEnd, me int,
 		currentTerm: 0,
 		votedFor:    -1,
 		logs:        make([]LogEntry, 1),
-		nextIndex:   make([]uint32, len(peers)),
-		matchIndex:  make([]uint32, len(peers)),
+		nextIndex:   make([]int, len(peers)),
+		matchIndex:  make([]int, len(peers)),
 	}
 
 	// initialize from state persisted before a crash
@@ -151,10 +130,10 @@ func (rf *Raft) ticker() {
 
 // return currentTerm and whether this server
 // believes it is the leader.
-func (rf *Raft) GetState() (uint32, bool) {
+func (rf *Raft) GetState() (int, bool) {
 	rf.mu.Lock()
 	defer rf.mu.Unlock()
-	var term uint32
+	var term int
 	var isleader bool
 	term = rf.currentTerm
 	isleader = rf.state == StateLeader

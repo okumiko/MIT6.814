@@ -3,27 +3,27 @@ package raft
 //日志条目
 type LogEntry struct {
 	Command interface{}
-	Term    uint32
-	Index   uint32
+	Term    int
+	Index   int
 }
 
 type AppendEntriesArgs struct {
-	Term     uint32 // leader的任期号
-	LeaderId int    // 用来让follower把客户端请求定向到leader
+	Term     int // leader的任期号
+	LeaderId int // 用来让follower把客户端请求定向到leader
 
-	PrevLogIndex uint32     // 紧接新条目之前的日志条目索引(当前最大的日志条目索引)
-	PrevLogTerm  uint32     // prevLogIndex的任期
-	LogEntries   []LogEntry // 储存的日志条目(如果某条目是空的，它就是心跳；为了提高效率可能会发出不止一条日志)
-	LeaderCommit int        // leader的commitIndex
+	PrevLogIndex int         // 紧接新条目之前的日志条目索引(当前最大的日志条目索引)
+	PrevLogTerm  int         // prevLogIndex的任期
+	LogEntries   []*LogEntry // 储存的日志条目(如果某条目是空的，它就是心跳；为了提高效率可能会发出不止一条日志)
+	LeaderCommit int         // leader的commitIndex
 }
 
 type AppendEntriesReply struct {
-	Term    uint32 // 当前任期，用来让leader更新自己
-	Success bool   // 如果follower包含的日志匹配参数汇总的prevLogIndex和prevLogTerm，返回true
+	Term    int  // 当前任期，用来让leader更新自己
+	Success bool // 如果follower包含的日志匹配参数汇总的prevLogIndex和prevLogTerm，返回true
 
 	// OPTIMIZE: see thesis section 5.3
-	ConflictTerm  uint32 // 2C
-	ConflictIndex uint32 // 2C
+	ConflictTerm  int // 2C
+	ConflictIndex int // 2C
 }
 
 //leader收到客户端的命令后，封装成一个log entry，append到本地log中，然后向所有的follower发送AppendEntries RPC。当收到多数follower的响应时，leader认为该log entry已提交，然后可以在本地状态机上执行该命令，并返回结果给客户端，同时通知各个follower该log entry已提交，follower收到该通知后就可以将命令送入状态机执行。
@@ -51,12 +51,12 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 		return
 	}
 
+	//消息任期靠后，一定要成为跟随者
 	if args.Term > rf.currentTerm {
 		rf.currentTerm = args.Term
 	}
 
 	rf.ChangeState(StateFollower)
-	resetTimer(rf.electionTimer, RandomizedElectionTimeout())
 
 	if args.PrevLogIndex < rf.getFirstLog().Index {
 		reply.Term, reply.Success = 0, false
@@ -64,20 +64,21 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 		return
 	}
 
+	//本地log里没有和preLogTerm以及preLogIndex相匹配的log，说明领导者那里的log除了这次发的还有没同步的，需要把之前的也同步过来
 	if !rf.matchLog(args.PrevLogTerm, args.PrevLogIndex) {
-		response.Term, response.Success = rf.currentTerm, false
-		lastIndex := rf.getLastLog().Index
-		if lastIndex < request.PrevLogIndex {
-			response.ConflictTerm, response.ConflictIndex = -1, lastIndex+1
-		} else {
-			firstIndex := rf.getFirstLog().Index
-			response.ConflictTerm = rf.logs[request.PrevLogIndex-firstIndex].Term
-			index := request.PrevLogIndex - 1
-			for index >= firstIndex && rf.logs[index-firstIndex].Term == response.ConflictTerm {
-				index--
-			}
-			response.ConflictIndex = index
-		}
+		reply.Term, reply.Success = rf.currentTerm, false //拒绝接受，返回自己的term
+		//lastIndex := rf.getLastLog().Index
+		//if lastIndex < args.PrevLogIndex {
+		//	reply.ConflictTerm, reply.ConflictIndex = -1, lastIndex+1
+		//} else {
+		//	firstIndex := rf.getFirstLog().Index
+		//	reply.ConflictTerm = rf.logs[args.PrevLogIndex-firstIndex].Term
+		//	index := args.PrevLogIndex - 1
+		//	for index >= firstIndex && rf.logs[index-firstIndex].Term == reply.ConflictTerm {
+		//		index--
+		//	}
+		//	reply.ConflictIndex = index
+		//}
 		return
 	}
 
@@ -87,19 +88,19 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 	//因为绝对相信领导者，找到index=43的term不一样，发生冲突。本地log后面的都要删除，请求log 45后面的都要写入。
 	firstIndex := rf.getFirstLog().Index
 	for index, entry := range args.LogEntries {
-		if entry.Index-firstIndex >= uint32(len(rf.logs)) || rf.logs[entry.Index-firstIndex].Term != entry.Term { //args里遍历剩下的日志本地没有，直接同意更新 或者 遇到了任期不同的日志，舍弃后面的
-			rf.logs = mergeEntriesArray(append(rf.logs[:entry.Index-firstIndex], args.LogEntries[index:]...))
+		if entry.Index-firstIndex >= int(len(rf.logs)) || rf.logs[entry.Index-firstIndex].Term != entry.Term { //args里遍历剩下的日志本地没有，直接同意更新 或者 遇到了任期不同的日志，舍弃后面的
+			rf.logs = shrankEntriesArray(append(rf.logs[:entry.Index-firstIndex], args.LogEntries[index:]...))
 			break
 		}
 	}
 
 	rf.advanceCommitIndexForFollower(request.LeaderCommit)
 
-	response.Term, response.Success = rf.currentTerm, true
+	reply.Term, args.Success = rf.currentTerm, true
 }
 
 //使用前上锁
-func (rf *Raft) matchLog(PrevLogTerm, PrevLogIndex uint32) bool {
+func (rf *Raft) matchLog(PrevLogTerm, PrevLogIndex int) bool {
 	relativeIndex := PrevLogIndex - rf.getFirstLog().Index //
 	return rf.logs[relativeIndex].Term == PrevLogTerm
 }
@@ -110,10 +111,20 @@ func (rf *Raft) getLastLog() *LogEntry {
 	n := len(rf.logs)
 	return &LogEntry{
 		Term:  rf.logs[n-1].Term,
-		Index: lastSnapshotIndex + uint32(n) - 1,
+		Index: lastSnapshotIndex + int(n) - 1,
 	}
 }
 
 func (rf *Raft) getFirstLog() *LogEntry {
 
+}
+
+//本地logs属于长久的切片，在经过合并后会造成cap比len长
+//切片里存放的是指针对象，那么下面删除末尾的元素后，被删除的元素依然被切片底层数组引用，从而导致不能及时被自动垃圾回收器回收
+//采用复制一份大小合适的
+func shrankEntriesArray(logs []*LogEntry) []*LogEntry {
+	shrankLogs := make([]*LogEntry, len(logs))
+	copy(shrankLogs, logs)
+	logs = nil
+	return shrankLogs
 }

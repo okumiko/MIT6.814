@@ -3,13 +3,13 @@ package raft
 import "time"
 
 type RequestVoteArgs struct {
-	Term        uint32 //candidate的任期号
-	CandidateId int    //发起投票的candidate的ID
+	Term        int //candidate的任期号
+	CandidateId int //发起投票的candidate的ID
 }
 
 type RequestVoteReply struct {
-	Term        uint32 //服务器的当前任期号，让candidate更新自己
-	VoteGranted bool   //如果是true，意味着candidate收到了选票
+	Term        int  //服务器的当前任期号，让candidate更新自己
+	VoteGranted bool //如果是true，意味着candidate收到了选票
 }
 
 //处理请求投票handle
@@ -89,7 +89,7 @@ func (rf *Raft) StartElection() {
 //状态转换函数，用之前必须上锁
 func (rf *Raft) ChangeState(state StateType) {
 	if state == rf.state {
-		return
+
 	}
 	DPrintf("Term %d: server %d change state from %v to %v\n", rf.currentTerm, rf.me, rf.state, state)
 	rf.state = state
@@ -131,4 +131,14 @@ func resetTimer(timer *time.Timer, d time.Duration) {
 		}
 	}
 	timer.Reset(d)
+}
+
+func (rf *Raft) holdState() {
+	switch rf.state {
+	case StateLeader:
+	case StateCandidate:
+	case StateFollower:
+
+		resetTimer(rf.electionTimer, RandomizedElectionTimeout()) //重置选举定时器计时（随机时间）
+	}
 }
