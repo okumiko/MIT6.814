@@ -15,11 +15,11 @@ import (
 	"sync/atomic"
 )
 
-
 type ApplyMsg struct {
 	CommandValid bool
 	Command      interface{}
 	CommandIndex int
+	CommandTerm  int
 
 	// For 2D:
 	SnapshotValid bool
@@ -28,10 +28,9 @@ type ApplyMsg struct {
 	SnapshotIndex int
 }
 
-type
 //raft节点
 type Raft struct {
-	mu        sync.Mutex          // Lock to protect shared access to this peer's state
+	mu        sync.RWMutex        // Lock to protect shared access to this peer's state
 	peers     []*labrpc.ClientEnd // RPC end points of all peers
 	persister *Persister          // Object to hold this peer's persisted state
 	me        int                 // this peer's index into peers[]
@@ -39,9 +38,9 @@ type Raft struct {
 
 	//所有服务器上的持久化状态，在回复RPC之前更新持久化存储
 	//term的主要作用是用于识别出过时信息。比如网络分区时，某一分区的server的term滞后，分区恢复后就能根据term值识别出过期的server，过期的server也可以根据收到的较大的term更新自己的term。
-	currentTerm int      //服务器知道的最近任期，当服务器启动时初始化为0
-	votedFor    int         //当前任期中，该服务器给投过票的candidateId，如果没有则为null
-	logs        []*LogEntry //日志条目；每一条包含了状态机指令以及该条目被leader收到时的任期号
+	currentTerm int        //服务器知道的最近任期，当服务器启动时初始化为0
+	votedFor    int        //当前任期中，该服务器给投过票的candidateId，如果没有则为null
+	logs        []LogEntry //日志条目；每一条包含了状态机指令以及该条目被leader收到时的任期号
 	// 第一个条目是一个虚拟条目，其中包含 LastSnapshotTerm、LastSnapshotIndex 和 nil 命令
 
 	//所有服务器上的易失性状态
@@ -49,8 +48,8 @@ type Raft struct {
 	lastApplied int //应用到状态机的最高日志条目索引号，一开始为0，单调递增
 
 	//leader上的易失性状态，在选举之后重新初始化
-	nextIndex  []int //针对所有的服务器，内容是需要发送给每个服务器下一条日志条目索引号(初始化为leader的最高索引号+1)
-	matchIndex []int //针对所有的服务器，内容是已知要复制到每个服务器上的最高日志条目号，初始化为0，单调递增
+	nextIndex  []int //针对所有的服务器，leader将发送给该follower的下一个日志条目的索引(初始化为leader的最高索引号+1)
+	matchIndex []int //针对所有的服务器，目前已知的同步给这个节点的最高log的index。，初始化为0，单调递增
 
 	applyCh        chan ApplyMsg
 	applyCond      *sync.Cond
@@ -72,29 +71,60 @@ type Raft struct {
 func Make(peers []*labrpc.ClientEnd, me int,
 	persister *Persister, applyCh chan ApplyMsg) *Raft {
 	rf := &Raft{
-		peers:     peers,
-		persister: persister,
-		me:        me,
-		dead:      0,
-		//applyCh:        applyCh,
-		//replicatorCond: make([]*sync.Cond, len(peers)),
-		state:       StateFollower,
-		currentTerm: 0,
-		votedFor:    -1,
-		logs:        make([]LogEntry, 1),
-		nextIndex:   make([]int, len(peers)),
-		matchIndex:  make([]int, len(peers)),
+		peers:          peers,
+		persister:      persister,
+		me:             me,
+		dead:           0,
+		applyCh:        applyCh,
+		replicatorCond: make([]*sync.Cond, len(peers)),
+		state:          StateFollower,
+		currentTerm:    0,
+		votedFor:       -1,
+		logs:           make([]LogEntry, 1),
+		nextIndex:      make([]int, len(peers)),
+		matchIndex:     make([]int, len(peers)),
 	}
 
 	// initialize from state persisted before a crash
 	rf.readPersist(persister.ReadRaftState())
 
-	//rf.applyCond = sync.NewCond(&rf.mu)
+	rf.applyCond = sync.NewCond(&rf.mu)
+	lastLog := rf.getLastLog()
+	for i := 0; i < len(peers); i++ {
+		rf.matchIndex[i], rf.nextIndex[i] = 0, lastLog.Index+1
+		if i != rf.me {
+			rf.replicatorCond[i] = sync.NewCond(&sync.Mutex{})
+			// start replicator goroutine to replicate entries in batch
+			go rf.replicator(i)
+		}
+	}
 
 	// start ticker goroutine to start elections
 	go rf.ticker()
 
 	return rf
+}
+
+func (rf *Raft) replicator(peer int) {
+	rf.replicatorCond[peer].L.Lock()
+	defer rf.replicatorCond[peer].L.Unlock()
+	for rf.killed() == false {
+		// if there is no need to replicate entries for this peer, just release CPU and wait other goroutine's signal if service adds new Command
+		// if this peer needs replicating entries, this goroutine will call replicateOneRound(peer) multiple times until this peer catches up, and then wait
+		for !rf.needReplicating(peer) {
+			rf.replicatorCond[peer].Wait() //goroutine休眠
+		}
+		// maybe a pipeline mechanism is better to trade-off the memory usage and catch up time
+		rf.replicateOneRound(peer) //replicate协程负责发送心跳
+	}
+}
+
+func (rf *Raft) needReplicating(peer int) bool {
+	rf.mu.RLock()
+	defer rf.mu.RUnlock()
+
+	//leader本地的最高日志比已知要复制的最高日志index高，说明要增加要复制的日志
+	return rf.state == StateLeader && rf.matchIndex[peer] < rf.getLastLog().Index
 }
 
 //ticker 协程会定期收到两个 timer 的到期事件
@@ -108,11 +138,7 @@ func (rf *Raft) ticker() {
 				rf.mu.Lock()
 				defer rf.mu.Unlock()
 
-				if rf.state == StateFollower {
-					rf.ChangeState(StateCandidate) //follower：如果经过了选举超时(election timeout)还没有收到当前leader的AppendEntries或者candidate的投票请求：转为candidate
-				} else {
-					rf.StartElection() //candidate：如果经过了选举超时(选举定时器到达了)：开始一个新的选举
-				}
+				rf.ToState(StateCandidate) //转变为候选人
 			}()
 		case <-rf.heartbeatTimer.C:
 			func() {
@@ -175,14 +201,30 @@ func (rf *Raft) readPersist(data []byte) {
 	// }
 }
 
-//
-// A service wants to switch to snapshot.  Only do so if Raft hasn't
-// have more recent info since it communicate the snapshot on applyCh.
-//
+// 一个服务想要切换到快照。 只有在 Raft 没有更新的信息时才这样做，因为它在 applyCh 上传达了快照。
 func (rf *Raft) CondInstallSnapshot(lastIncludedTerm int, lastIncludedIndex int, snapshot []byte) bool {
+	rf.mu.Lock()
+	defer rf.mu.Unlock()
+	DPrintf("{Node %v} service calls CondInstallSnapshot with lastIncludedTerm %v and lastIncludedIndex %v to check whether snapshot is still valid in term %v", rf.me, lastIncludedTerm, lastIncludedIndex, rf.currentTerm)
 
-	// Your code here (2D).
+	// outdated snapshot
+	if lastIncludedIndex <= rf.commitIndex {
+		DPrintf("{Node %v} rejects the snapshot which lastIncludedIndex is %v because commitIndex %v is larger", rf.me, lastIncludedIndex, rf.commitIndex)
+		return false
+	}
 
+	if lastIncludedIndex > rf.getLastLog().Index {
+		rf.logs = make([]LogEntry, 1)
+	} else {
+		rf.logs = shrinkEntriesArray(rf.logs[lastIncludedIndex-rf.getFirstLog().Index:])
+		rf.logs[0].Command = nil
+	}
+	// update dummy entry with lastIncludedTerm and lastIncludedIndex
+	rf.logs[0].Term, rf.logs[0].Index = lastIncludedTerm, lastIncludedIndex
+	rf.lastApplied, rf.commitIndex = lastIncludedIndex, lastIncludedIndex
+
+	rf.persister.SaveStateAndSnapshot(rf.encodeState(), snapshot)
+	DPrintf("{Node %v}'s state is {state %v,term %v,commitIndex %v,lastApplied %v,firstLog %v,lastLog %v} after accepting the snapshot which lastIncludedTerm is %v, lastIncludedIndex is %v", rf.me, rf.state, rf.currentTerm, rf.commitIndex, rf.lastApplied, rf.getFirstLog(), rf.getLastLog(), lastIncludedTerm, lastIncludedIndex)
 	return true
 }
 
@@ -243,12 +285,5 @@ func (rf *Raft) BroadcastHeartbeat(isHeartBeat bool) {
 			// just signal replicator goroutine to send entries in batch
 			rf.replicatorCond[peer].Signal()
 		}
-	}
-}
-
-func (rf *Raft) genRequestVoteArgs() *RequestVoteArgs {
-	return &RequestVoteArgs{
-		Term:        rf.currentTerm,
-		CandidateId: rf.me,
 	}
 }
