@@ -86,30 +86,34 @@ func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 		return
 	}
 
-	//投票，变成跟随者
+	//发现了新的term，自己的term老，可以成为follower了，主要是重置定时器
+	//并且上轮的投票可以作废了，毕竟有新的term了，不就是说明上轮投票失败了
 	if args.Term > rf.currentTerm {
 		rf.ToState(StateFollower) //当前节点改变状态
 		rf.currentTerm, rf.votedFor = args.Term, -1
 	}
 
+	//没有最新日志不会当leader
 	if !rf.isLogUpToDate(args.LastLogTerm, args.LastLogIndex) {
 		reply.Term, reply.VoteGranted = rf.currentTerm, false
 		return
 	}
-	rf.votedFor = args.CandidateId
+
+	//同意投票
+	rf.votedFor, reply.Term, reply.VoteGranted = args.CandidateId, rf.currentTerm, true
+
 	resetTimer(rf.electionTimer, RandomizedElectionTimeout()) //reset选举定时器
-	reply.Term, reply.VoteGranted = rf.currentTerm, true
 }
 
 //用于投票时，投票者判断candidate的日志是否至少和接收者的日志一样新(up-to-date)
-func (rf *Raft) isLogUpToDate(LastLogTerm, LastLogIndex int) bool {
+func (rf *Raft) isLogUpToDate(argsLastLogTerm, argsLastLogIndex int) bool {
 	localLastLog := rf.getLastLog()
-	if LastLogTerm != localLastLog.Term {
+	if argsLastLogTerm != localLastLog.Term {
 		//任期不同，任期优先级最高
-		return LastLogTerm > localLastLog.Term
+		return argsLastLogTerm > localLastLog.Term
 	} else {
 		//至少一样新
-		return LastLogIndex >= localLastLog.Index
+		return argsLastLogIndex >= localLastLog.Index
 	}
 }
 
@@ -120,6 +124,7 @@ func (rf *Raft) replicateOneRound(peer int) {
 		return
 	}
 	prevLogIndex := rf.nextIndex[peer] - 1
+	DPrintf("[replicateOneRound] <%v|%v>'s <peer %v> preLogIndex: %v, localLog: %v", rf.state, rf.me, peer, prevLogIndex, rf.logs)
 	if prevLogIndex < rf.getFirstLog().Index { //preLogIndex比本地firstLog还小，说明无法通过本地日志恢复，只能用快照
 		// only snapshot can catch up
 		args := &InstallSnapshotArgs{
@@ -148,4 +153,5 @@ func (rf *Raft) replicateOneRound(peer int) {
 			rf.mu.Unlock()
 		}
 	}
+	DPrintf("[replicateOneRound] <%v|%v>'s <peer %v>'s matchLogIndex: %v, nextLogIndex: %v", rf.state, rf.me, peer, rf.matchIndex[peer], rf.nextIndex[peer])
 }

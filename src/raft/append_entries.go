@@ -8,8 +8,8 @@ type LogEntry struct {
 }
 
 type AppendEntriesArgs struct {
-	Term     int // leader的任期号
 	LeaderId int // 用来让follower把客户端请求定向到leader
+	Term     int // leader的任期号
 
 	PrevLogIndex      int        // 紧接新条目之前的日志条目索引(当前最大的日志条目索引)
 	PrevLogTerm       int        // prevLogIndex的任期
@@ -43,7 +43,7 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 	rf.mu.Lock()
 	defer rf.mu.Unlock()
 	defer rf.persist() // execute before rf.mu.Unlock()
-	defer DPrintf("{Node %v}'s state is {state %v,term %v,commitIndex %v,lastApplied %v,firstLog %v,lastLog %v} before processing AppendEntriesRequest %v and reply AppendEntriesResponse %v", rf.me, rf.state, rf.currentTerm, rf.commitIndex, rf.lastApplied, rf.getFirstLog(), rf.getLastLog(), args, reply)
+	defer DPrintf("[AppendEntries] <<Node %v>: role %v,term %v,commitIndex %v,lastApplied %v,firstLog %v,lastLog %v> args: %v  reply: %v", rf.me, rf.state.String(), rf.currentTerm, rf.commitIndex, rf.lastApplied, rf.getFirstLog(), rf.getLastLog(), args, reply)
 
 	//如果参数term小于接收者的currentTerm，返回false,过期消息，拒绝复制
 	if args.Term < rf.currentTerm {
@@ -52,7 +52,7 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 	}
 
 	if args.Term > rf.currentTerm {
-		rf.currentTerm = args.Term
+		rf.currentTerm, rf.votedFor = args.Term, -1
 	}
 
 	//消息任期大于等于，要成为跟随者
@@ -135,6 +135,7 @@ func (rf *Raft) getFirstLog() LogEntry {
 	return rf.logs[0]
 }
 func (rf *Raft) advanceCommitIndexForFollower(leaderCommitIndex int) {
+	DPrintf("[advanceCommitIndexForFollower] <%v|%v> receives leader's leaderCommitIndex: %v,local commitIndex: %v", rf.state, rf.me, leaderCommitIndex, rf.commitIndex)
 	if leaderCommitIndex > rf.commitIndex { // 领导者保证拥有所有提交的条目
 		lastLogIndex := rf.getLastLog().Index
 		rf.commitIndex = Min(leaderCommitIndex, lastLogIndex)
@@ -155,6 +156,7 @@ func (rf *Raft) applier() {
 		entries := deepCopyLogEntries(rf.logs[rf.getRelativeLogIndex(lastApplied)+1 : rf.getRelativeLogIndex(commitIndex)+1])
 		rf.mu.Unlock()
 		//push applyCh 的过程不能够持锁
+		DPrintf("[applier] <%v|%v> apply logs: %v", rf.state, rf.me, entries)
 		for _, entry := range entries {
 			rf.applyCh <- ApplyMsg{
 				CommandValid: true,
@@ -211,7 +213,7 @@ func deepCopyLogEntries(src []LogEntry) (dst []LogEntry) {
 	return
 }
 
-//处理返回的结果
+//处理返回的结果，使用前上锁
 func (rf *Raft) handleAppendEntriesResponse(server int, args *AppendEntriesArgs, reply *AppendEntriesReply) {
 	if rf.state != StateLeader {
 		return
@@ -233,12 +235,14 @@ func (rf *Raft) handleAppendEntriesResponse(server int, args *AppendEntriesArgs,
 					count += 1
 				}
 			}
-
+			DPrintf("[handleAppendEntriesResponse] <%v|%v> matchIndex: %v, count: %v", rf.state, rf.me, i, count)
 			//超过半数
 			if count > len(rf.peers)/2 {
 				// most of nodes agreed on rf.logs[i]
+				rf.commitIndex = i
 				rf.applyCond.Signal()
 				//因为index从大到小，找到个最大的满足了直接break
+				DPrintf("[handleAppendEntriesResponse] <%v|%v> apply log", rf.state, rf.me)
 				break
 			}
 		}

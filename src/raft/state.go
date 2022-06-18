@@ -11,9 +11,9 @@ const (
 type StateType int
 
 var stmap = [...]string{
-	"StateFollower",
-	"StateCandidate",
-	"StateLeader",
+	"FOLLOWER",
+	"CANDIDATE",
+	"LEADER",
 }
 
 func (st StateType) String() string {

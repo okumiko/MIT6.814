@@ -114,12 +114,14 @@ func Make(peers []*labrpc.ClientEnd, me int,
 func (rf *Raft) replicator(peer int) {
 	rf.replicatorCond[peer].L.Lock()
 	defer rf.replicatorCond[peer].L.Unlock()
+
 	for rf.killed() == false {
 		// if there is no need to replicate entries for this peer, just release CPU and wait other goroutine's signal if service adds new Command
 		// if this peer needs replicating entries, this goroutine will call replicateOneRound(peer) multiple times until this peer catches up, and then wait
 		for !rf.needReplicating(peer) {
 			rf.replicatorCond[peer].Wait() //goroutine休眠
 		}
+		DPrintf("[replicator] <Node %v>'s <peer %v>'s replicator run. matchLogIndex: %v, localLog: %v", rf.me, peer, rf.matchIndex[peer], rf.logs)
 		// maybe a pipeline mechanism is better to trade-off the memory usage and catch up time
 		rf.replicateOneRound(peer) //replicate协程负责发送心跳
 	}
@@ -228,7 +230,7 @@ func (rf *Raft) Start(command interface{}) (int, int, bool) {
 		rf.logs = append(rf.logs, LogEntry{Command: command, Term: term, Index: index})
 		rf.matchIndex[rf.me] = index
 		rf.nextIndex[rf.me] = index + 1
-		DPrintf("{Node %v} receives a new command[%v] to replicate in term %v", rf.me, command, rf.currentTerm)
+		DPrintf("[Start] <Node %v> receives command: |%v| in term %v", rf.me, command, rf.currentTerm)
 		rf.BroadcastHeartbeat(false)
 		rf.mu.Unlock()
 	}
