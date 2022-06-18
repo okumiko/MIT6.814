@@ -111,21 +111,23 @@ func (rf *Raft) handleInstallSnapshotResponse(server int, args *InstallSnapshotA
 
 // A service wants to switch to snapshot.  Only do so if Raft hasn't
 // have more recent info since it communicate the snapshot on applyCh.
+//对于服务上层触发的 CondInstallSnapshot，与上面类似，如果 snapshot 没有更新的话就没有必要去换，否则就接受对应的 snapshot 并处理对应状态的变更。
+//注意，这里不需要判断 lastIncludeIndex 和 lastIncludeTerm 是否匹配，因为 follower 对于 leader 发来的更新的 snapshot 是无条件服从的。
+//lastInclude是指快照里最新的log
 func (rf *Raft) CondInstallSnapshot(lastIncludedTerm int, lastIncludedIndex int, snapshot []byte) bool {
-	// Your code here (2D).
 	rf.mu.Lock()
 	defer rf.mu.Unlock()
 	DPrintf("{Node %v} service calls CondInstallSnapshot with lastIncludedTerm %v and lastIncludedIndex %v to check whether snapshot is still valid in term %v", rf.me, lastIncludedTerm, lastIncludedIndex, rf.currentTerm)
 
-	// outdated snapshot
+	// 过期的快照
 	if lastIncludedIndex <= rf.commitIndex {
 		DPrintf("{Node %v} rejects the snapshot which lastIncludedIndex is %v because commitIndex %v is larger", rf.me, lastIncludedIndex, rf.commitIndex)
 		return false
 	}
 
-	if lastIncludedIndex > rf.getLastLog().Index {
+	if lastIncludedIndex > rf.getLastLog().Index { //用快照替换
 		rf.logs = make([]LogEntry, 1)
-	} else {
+	} else { //快照index之前的log可以删除了，已经持久化了
 		rf.logs = shrinkEntriesArray(rf.logs[lastIncludedIndex-rf.getFirstLog().Index:])
 		rf.logs[0].Command = nil
 	}
