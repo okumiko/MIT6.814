@@ -48,6 +48,11 @@ type InstallSnapshotReply struct {
 	Term int // follower的当前任期，leader可以用来更新自己
 }
 
+func (rf *Raft) sendInstallSnapshot(server int, args *InstallSnapshotArgs, reply *InstallSnapshotReply) bool {
+	ok := rf.peers[server].Call("Raft.InstallSnapshot", args, reply)
+	return ok
+}
+
 func (rf *Raft) InstallSnapshot(args *InstallSnapshotArgs, reply *InstallSnapshotReply) {
 	rf.mu.Lock()
 	defer rf.mu.Unlock()
@@ -66,7 +71,7 @@ func (rf *Raft) InstallSnapshot(args *InstallSnapshotArgs, reply *InstallSnapsho
 		rf.persist()
 	}
 
-	rf.ToState(StateFollower)
+	rf.becomeFollower()
 
 	// outdated snapshot
 	//如果该 snapshot 的 lastIncludedIndex 小于等于本地的 commitIndex，那说明本地已经包含了该 snapshot 所有的数据信息，
@@ -89,22 +94,19 @@ func (rf *Raft) InstallSnapshot(args *InstallSnapshotArgs, reply *InstallSnapsho
 //处理reply
 func (rf *Raft) handleInstallSnapshotResponse(server int, args *InstallSnapshotArgs, reply *InstallSnapshotReply) {
 	if reply.Term > rf.currentTerm { //返回的任期比现在要靠后，转变成跟随者
-		rf.currentTerm = reply.Term
-		rf.ToState(StateFollower)
-		rf.persist()
+		rf.becomeFollower()
+		{
+			rf.currentTerm = reply.Term
+			rf.persist()
+		}
 	} else {
-		//日志index跑到了matchindex后面，更新下
+		//日志index跑到了matchIndex后面，更新下
 		if rf.matchIndex[server] < args.LastIncludedIndex {
 			rf.matchIndex[server] = args.LastIncludedIndex
 		}
 		//把nextIndex更新为matchIndex+1，下一个要发给follower的index是已经匹配的index+1
 		rf.nextIndex[server] = rf.matchIndex[server] + 1
 	}
-}
-
-func (rf *Raft) sendInstallSnapshot(server int, args *InstallSnapshotArgs, reply *InstallSnapshotReply) bool {
-	ok := rf.peers[server].Call("Raft.InstallSnapshot", args, reply)
-	return ok
 }
 
 // A service wants to switch to snapshot.  Only do so if Raft hasn't

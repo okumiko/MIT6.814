@@ -7,7 +7,7 @@ import (
 )
 
 // Debugging
-const Debug = true
+const Debug = false
 
 const (
 	HeartbeatInterval    = time.Duration(120) * time.Millisecond

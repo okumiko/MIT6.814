@@ -92,6 +92,7 @@ func Make(peers []*labrpc.ClientEnd, me int,
 	// initialize from state persisted before a crash
 	rf.readPersist(persister.ReadRaftState())
 
+	DPrintf("[Make] <%v|%v> restart, logs: %v", rf.state, rf.me, rf.logs)
 	rf.applyCond = sync.NewCond(&rf.mu)
 	lastLog := rf.getLastLog()
 	for i := 0; i < len(peers); i++ {
@@ -146,7 +147,7 @@ func (rf *Raft) ticker() {
 				rf.mu.Lock()
 				defer rf.mu.Unlock()
 
-				rf.ToState(StateCandidate) //转变为候选人
+				rf.becomeCandidate() //转变为候选人
 			}()
 		case <-rf.heartbeatTimer.C:
 			func() {
@@ -154,7 +155,7 @@ func (rf *Raft) ticker() {
 				defer rf.mu.Unlock()
 
 				if rf.state == StateLeader { //在选举之前：发送空的AppendEntries RPC(心跳)给所有的服务器，一段时间后重复发送来防止选举超时的发生
-					rf.BroadcastHeartbeat(true)                             //广播心跳
+					rf.Broadcast(true)                                      //广播心跳
 					resetTimer(rf.heartbeatTimer, StableHeartbeatTimeout()) //重置定时器时间
 				}
 			}()
@@ -228,10 +229,12 @@ func (rf *Raft) Start(command interface{}) (int, int, bool) {
 		rf.mu.Lock()
 		index = rf.getLastLog().Index + 1
 		rf.logs = append(rf.logs, LogEntry{Command: command, Term: term, Index: index})
+		rf.persist()
+
 		rf.matchIndex[rf.me] = index
 		rf.nextIndex[rf.me] = index + 1
 		DPrintf("[Start] <Node %v> receives command: |%v| in term %v", rf.me, command, rf.currentTerm)
-		rf.BroadcastHeartbeat(false)
+		rf.Broadcast(false)
 		rf.mu.Unlock()
 	}
 
@@ -259,7 +262,7 @@ func (rf *Raft) killed() bool {
 	return z == 1
 }
 
-func (rf *Raft) BroadcastHeartbeat(isHeartBeat bool) {
+func (rf *Raft) Broadcast(isHeartBeat bool) {
 	for peer := range rf.peers {
 		if peer == rf.me {
 			continue

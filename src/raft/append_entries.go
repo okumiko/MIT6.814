@@ -1,29 +1,33 @@
 package raft
 
-//日志条目
-type LogEntry struct {
-	Command interface{}
-	Term    int
-	Index   int
-}
+type (
+	LogEntry struct {
+		Command interface{}
+		Term    int
+		Index   int
+	}
+	AppendEntriesArgs struct {
+		LeaderId int // 用来让follower把客户端请求定向到leader
+		Term     int // leader的任期号
 
-type AppendEntriesArgs struct {
-	LeaderId int // 用来让follower把客户端请求定向到leader
-	Term     int // leader的任期号
+		PrevLogIndex      int        // 紧接新条目之前的日志条目索引(当前最大的日志条目索引)
+		PrevLogTerm       int        // prevLogIndex的任期
+		LogEntries        []LogEntry // 储存的日志条目(如果某条目是空的，它就是心跳；为了提高效率可能会发出不止一条日志)
+		LeaderCommitIndex int        // leader的commitIndex
+	}
+	AppendEntriesReply struct {
+		Term    int  // 当前任期，用来让leader更新自己
+		Success bool // 如果follower包含的日志匹配参数汇总的prevLogIndex和prevLogTerm，返回true
 
-	PrevLogIndex      int        // 紧接新条目之前的日志条目索引(当前最大的日志条目索引)
-	PrevLogTerm       int        // prevLogIndex的任期
-	LogEntries        []LogEntry // 储存的日志条目(如果某条目是空的，它就是心跳；为了提高效率可能会发出不止一条日志)
-	LeaderCommitIndex int        // leader的commitIndex
-}
+		// OPTIMIZE: see thesis section 5.3
+		ConflictTerm  int // 2C
+		ConflictIndex int // 2C
+	}
+)
 
-type AppendEntriesReply struct {
-	Term    int  // 当前任期，用来让leader更新自己
-	Success bool // 如果follower包含的日志匹配参数汇总的prevLogIndex和prevLogTerm，返回true
-
-	// OPTIMIZE: see thesis section 5.3
-	ConflictTerm  int // 2C
-	ConflictIndex int // 2C
+func (rf *Raft) sendAppendEntries(server int, args *AppendEntriesArgs, reply *AppendEntriesReply) bool {
+	ok := rf.peers[server].Call("Raft.AppendEntries", args, reply)
+	return ok
 }
 
 //leader收到客户端的命令后，封装成一个log entry，append到本地log中，然后向所有的follower发送AppendEntries RPC。当收到多数follower的响应时，leader认为该log entry已提交，然后可以在本地状态机上执行该命令，并返回结果给客户端，同时通知各个follower该log entry已提交，follower收到该通知后就可以将命令送入状态机执行。
@@ -55,13 +59,13 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 		rf.currentTerm, rf.votedFor = args.Term, -1
 	}
 
-	//消息任期大于等于，要成为跟随者
-	rf.ToState(StateFollower) //是否放上面括号里是个问题
+	//消息任期大于等于，心跳生效，需要重置选举计时器，也就是刷新follower状态
+	rf.becomeFollower()
 
 	//preLogIndex比本地最早的消息还要晚，说明肯定找不到，直接拒绝并返回term=0
 	if args.PrevLogIndex < rf.getFirstLog().Index {
 		reply.Term, reply.Success = 0, false
-		DPrintf("{Node %v} receives unexpected AppendEntriesRequest %v from {Node %v} because prevLogIndex %v < firstLogIndex %v", rf.me, args, args.LeaderId, args.PrevLogIndex, rf.getFirstLog().Index)
+		DPrintf("[AppendEntries] <%v|%v> receives unexpected AppendEntriesRequest %v from {Node %v} because prevLogIndex %v < firstLogIndex %v", rf.state, rf.me, args, args.LeaderId, args.PrevLogIndex, rf.getFirstLog().Index)
 		return
 	}
 
@@ -84,7 +88,7 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 		} else {
 			//本地最新日志比preLog晚，可以直接在跟随者这里确认冲突的任期，
 			// receiver's log in certain term unmatches Leader's log
-			reply.ConflictTerm = rf.logs[rf.getRelativeLogIndex(args.PrevLogIndex)].Term
+			reply.ConflictTerm = rf.getRelativeIndexLog(args.PrevLogIndex).Term
 
 			firstLog := rf.getFirstLog()
 			// 显然，因为 rf.logs[0] 确保在所有服务器之间匹配
@@ -114,21 +118,91 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 	}
 
 	rf.advanceCommitIndexForFollower(args.LeaderCommitIndex)
-
 	reply.Term, reply.Success = rf.currentTerm, true
+}
+
+//处理返回的结果，使用前上锁
+func (rf *Raft) handleAppendEntriesResponse(server int, args *AppendEntriesArgs, reply *AppendEntriesReply) {
+	if rf.state != StateLeader {
+		return
+	}
+	if reply.Success {
+		// successfully replicated args.LogEntries
+		//已经发送的日志index向后移动
+		//nextIndex为matchIndex+1
+		rf.matchIndex[server] = args.PrevLogIndex + len(args.LogEntries)
+		rf.nextIndex[server] = rf.matchIndex[server] + 1
+
+		// check if we need to update commitIndex
+		// from the last log entry to committed one
+		for i := rf.getLastLog().Index; i > rf.commitIndex; i-- {
+			count := 0
+			//该index已经发送给follower，则count++
+			for _, matchIndex := range rf.matchIndex {
+				if matchIndex >= i {
+					count += 1
+				}
+			}
+			DPrintf("[handleAppendEntriesResponse] <%v|%v> matchIndex: %v, count: %v", rf.state, rf.me, i, count)
+			//超过半数
+			if count > len(rf.peers)/2 {
+				// most of nodes agreed on rf.logs[i]
+				rf.commitIndex = i
+				rf.applyCond.Signal()
+				//因为index从大到小，找到个最大的满足了直接break
+				DPrintf("[handleAppendEntriesResponse] <%v|%v> apply log", rf.state, rf.me)
+				break
+			}
+		}
+	} else {
+		if reply.Term > rf.currentTerm {
+			rf.becomeFollower()
+			{
+				rf.currentTerm, rf.votedFor = reply.Term, -1
+				rf.persist()
+			}
+		} else {
+			// log unmatch, update nextIndex[server] for the next trial
+			rf.nextIndex[server] = reply.ConflictIndex
+
+			// if term found, override it to
+			// the first entry after entries in ConflictTerm
+			if reply.ConflictTerm != -1 {
+				DPrintf("%v conflict with server %d, prevLogIndex %d, log length = %d", rf, server, args.PrevLogIndex, len(rf.logs))
+				for index := args.PrevLogIndex; index >= rf.getFirstLog().Index+1; index-- {
+					//找到跟随者日志冲突的term的第一个index，尝试下
+					//找到prelog term一样的
+
+					if rf.getRelativeIndexLog(index-1).Term == reply.ConflictTerm {
+						// in next trial, check if log entries in ConflictTerm matches
+						rf.nextIndex[server] = index
+						break
+					}
+				}
+			}
+			// TODO: retry now or in next RPC?
+		}
+	}
 }
 
 //使用前上锁
 func (rf *Raft) matchLog(PrevLogTerm, PrevLogIndex int) bool {
-
-	relativeIndex := PrevLogIndex - rf.getFirstLog().Index
-	return rf.logs[relativeIndex].Term == PrevLogTerm
+	//本地是否有term和index一样的log
+	for i := len(rf.logs) - 1; i >= 0; i-- {
+		if rf.logs[i].Term == PrevLogTerm && rf.logs[i].Index == PrevLogIndex {
+			return true
+		}
+		//index和term都是递增的
+		if rf.logs[i].Term < PrevLogTerm || rf.logs[i].Index < PrevLogIndex {
+			break
+		}
+	}
+	return false
 }
 
 //使用前上锁
 func (rf *Raft) getLastLog() LogEntry {
-	n := len(rf.logs)
-	return rf.logs[n-1]
+	return rf.logs[len(rf.logs)-1]
 }
 
 func (rf *Raft) getFirstLog() LogEntry {
@@ -184,19 +258,14 @@ func shrinkEntriesArray(logs []LogEntry) []LogEntry {
 	return shrinkLogs
 }
 
-func (rf *Raft) sendAppendEntries(server int, args *AppendEntriesArgs, reply *AppendEntriesReply) bool {
-	ok := rf.peers[server].Call("Raft.AppendEntries", args, reply)
-	return ok
-}
-
 func (rf *Raft) genAppendEntriesArgs(prevLogIndex int) *AppendEntriesArgs {
 	return &AppendEntriesArgs{
 		Term:         rf.currentTerm,
 		LeaderId:     rf.me,
-		PrevLogTerm:  rf.logs[rf.getRelativeLogIndex(prevLogIndex)].Term,
+		PrevLogTerm:  rf.getRelativeIndexLog(prevLogIndex).Term,
 		PrevLogIndex: prevLogIndex,
 		//发送preLogIndex后面的日志（假设preLogIndex吻合）
-		LogEntries:        deepCopyLogEntries(rf.logs[rf.getRelativeLogIndex(prevLogIndex+1):]),
+		LogEntries:        deepCopyLogEntries(rf.logs[rf.getRelativeLogIndex(prevLogIndex)+1:]),
 		LeaderCommitIndex: rf.commitIndex,
 	}
 }
@@ -206,70 +275,13 @@ func (rf *Raft) getRelativeLogIndex(index int) int {
 	return index - rf.getFirstLog().Index
 }
 
+func (rf *Raft) getRelativeIndexLog(index int) LogEntry {
+	return rf.logs[index-rf.getFirstLog().Index]
+}
+
 func deepCopyLogEntries(src []LogEntry) (dst []LogEntry) {
 	n := len(src)
 	dst = make([]LogEntry, n)
 	copy(dst, src)
 	return
-}
-
-//处理返回的结果，使用前上锁
-func (rf *Raft) handleAppendEntriesResponse(server int, args *AppendEntriesArgs, reply *AppendEntriesReply) {
-	if rf.state != StateLeader {
-		return
-	}
-	if reply.Success {
-		// successfully replicated args.LogEntries
-		//已经发送的日志index向后移动
-		//nextIndex为matchIndex+1
-		rf.matchIndex[server] = args.PrevLogIndex + len(args.LogEntries)
-		rf.nextIndex[server] = rf.matchIndex[server] + 1
-
-		// check if we need to update commitIndex
-		// from the last log entry to committed one
-		for i := rf.getLastLog().Index; i > rf.commitIndex; i-- {
-			count := 0
-			//该index已经发送给follower，则count++
-			for _, matchIndex := range rf.matchIndex {
-				if matchIndex >= i {
-					count += 1
-				}
-			}
-			DPrintf("[handleAppendEntriesResponse] <%v|%v> matchIndex: %v, count: %v", rf.state, rf.me, i, count)
-			//超过半数
-			if count > len(rf.peers)/2 {
-				// most of nodes agreed on rf.logs[i]
-				rf.commitIndex = i
-				rf.applyCond.Signal()
-				//因为index从大到小，找到个最大的满足了直接break
-				DPrintf("[handleAppendEntriesResponse] <%v|%v> apply log", rf.state, rf.me)
-				break
-			}
-		}
-	} else {
-		if reply.Term > rf.currentTerm {
-			rf.currentTerm = reply.Term
-			rf.ToState(StateFollower)
-			rf.persist()
-		} else {
-			// log unmatch, update nextIndex[server] for the next trial
-			rf.nextIndex[server] = reply.ConflictIndex
-
-			// if term found, override it to
-			// the first entry after entries in ConflictTerm
-			if reply.ConflictTerm != -1 {
-				DPrintf("%v conflict with server %d, prevLogIndex %d, log length = %d", rf, server, args.PrevLogIndex, len(rf.logs))
-				for i := args.PrevLogIndex; i >= rf.logs[0].Index+1; i-- {
-					//找到跟随者日志冲突的term的第一个index，尝试下
-					if rf.logs[rf.getRelativeLogIndex(i-1)].Term == reply.ConflictTerm {
-						// in next trial, check if log entries in ConflictTerm matches
-						rf.nextIndex[server] = i
-						break
-					}
-				}
-			}
-			// TODO: retry now or in next RPC?
-		}
-
-	}
 }
