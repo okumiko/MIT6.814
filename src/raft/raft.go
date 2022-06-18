@@ -1,7 +1,9 @@
 package raft
 
 import (
+	"6.824/labgob"
 	"6.824/labrpc"
+	"bytes"
 	"sync"
 	"time"
 )
@@ -14,19 +16,6 @@ import (
 import (
 	"sync/atomic"
 )
-
-type ApplyMsg struct {
-	CommandValid bool
-	Command      interface{}
-	CommandIndex int
-	CommandTerm  int
-
-	// For 2D:
-	SnapshotValid bool
-	Snapshot      []byte
-	SnapshotTerm  int
-	SnapshotIndex int
-}
 
 //raft节点
 type Raft struct {
@@ -61,6 +50,19 @@ type Raft struct {
 	state StateType
 }
 
+type ApplyMsg struct {
+	CommandValid bool
+	Command      interface{}
+	CommandIndex int
+	CommandTerm  int
+
+	// For 2D:
+	SnapshotValid bool
+	Snapshot      []byte
+	SnapshotTerm  int
+	SnapshotIndex int
+}
+
 // 服务或测试者想要创建一个 Raft 服务器。
 //所有 Raft 服务器（包括这个）的端口都在 peers[] 中。
 //此服务器的端口是 peers[me]。
@@ -83,6 +85,8 @@ func Make(peers []*labrpc.ClientEnd, me int,
 		logs:           make([]LogEntry, 1),
 		nextIndex:      make([]int, len(peers)),
 		matchIndex:     make([]int, len(peers)),
+		heartbeatTimer: time.NewTimer(StableHeartbeatTimeout()),
+		electionTimer:  time.NewTimer(RandomizedElectionTimeout()),
 	}
 
 	// initialize from state persisted before a crash
@@ -102,6 +106,8 @@ func Make(peers []*labrpc.ClientEnd, me int,
 	// start ticker goroutine to start elections
 	go rf.ticker()
 
+	// start applier goroutine to push committed logs into applyCh exactly once
+	go rf.applier()
 	return rf
 }
 
@@ -168,15 +174,9 @@ func (rf *Raft) GetState() (int, bool) {
 
 // 将 Raft 的持久状态保存到稳定存储中，
 // 崩溃后可以在其中检索它并重新启动。
+//6.824每次改变currentTerm、votedFor、logs就要持久化
 func (rf *Raft) persist() {
-	// Your code here (2C).
-	// Example:
-	// w := new(bytes.Buffer)
-	// e := labgob.NewEncoder(w)
-	// e.Encode(rf.xxx)
-	// e.Encode(rf.yyy)
-	// data := w.Bytes()
-	// rf.persister.SaveRaftState(data)
+	rf.persister.SaveRaftState(rf.encodeState())
 }
 
 //
@@ -188,53 +188,27 @@ func (rf *Raft) readPersist(data []byte) {
 	}
 	// Your code here (2C).
 	// Example:
-	// r := bytes.NewBuffer(data)
-	// d := labgob.NewDecoder(r)
-	// var xxx
-	// var yyy
-	// if d.Decode(&xxx) != nil ||
-	//    d.Decode(&yyy) != nil {
-	//   error...
-	// } else {
-	//   rf.xxx = xxx
-	//   rf.yyy = yyy
-	// }
-}
-
-// 一个服务想要切换到快照。 只有在 Raft 没有更新的信息时才这样做，因为它在 applyCh 上传达了快照。
-func (rf *Raft) CondInstallSnapshot(lastIncludedTerm int, lastIncludedIndex int, snapshot []byte) bool {
-	rf.mu.Lock()
-	defer rf.mu.Unlock()
-	DPrintf("{Node %v} service calls CondInstallSnapshot with lastIncludedTerm %v and lastIncludedIndex %v to check whether snapshot is still valid in term %v", rf.me, lastIncludedTerm, lastIncludedIndex, rf.currentTerm)
-
-	// outdated snapshot
-	if lastIncludedIndex <= rf.commitIndex {
-		DPrintf("{Node %v} rejects the snapshot which lastIncludedIndex is %v because commitIndex %v is larger", rf.me, lastIncludedIndex, rf.commitIndex)
-		return false
-	}
-
-	if lastIncludedIndex > rf.getLastLog().Index {
-		rf.logs = make([]LogEntry, 1)
+	r := bytes.NewBuffer(data)
+	d := labgob.NewDecoder(r)
+	var (
+		currentTerm int
+		votedFor    int
+		logs        []LogEntry
+	)
+	if d.Decode(&currentTerm) != nil ||
+		d.Decode(&votedFor) != nil ||
+		d.Decode(&logs) != nil {
+		DPrintf("%v fails to recover from persist", rf)
 	} else {
-		rf.logs = shrinkEntriesArray(rf.logs[lastIncludedIndex-rf.getFirstLog().Index:])
-		rf.logs[0].Command = nil
+		rf.currentTerm = currentTerm
+		rf.votedFor = votedFor
+		rf.logs = logs
+
+		// for lab 3b, we need to set them at the first index
+		// i.e., 0 if snapshot is disabled
+		rf.commitIndex = rf.logs[0].Index
+		rf.lastApplied = rf.logs[0].Index
 	}
-	// update dummy entry with lastIncludedTerm and lastIncludedIndex
-	rf.logs[0].Term, rf.logs[0].Index = lastIncludedTerm, lastIncludedIndex
-	rf.lastApplied, rf.commitIndex = lastIncludedIndex, lastIncludedIndex
-
-	rf.persister.SaveStateAndSnapshot(rf.encodeState(), snapshot)
-	DPrintf("{Node %v}'s state is {state %v,term %v,commitIndex %v,lastApplied %v,firstLog %v,lastLog %v} after accepting the snapshot which lastIncludedTerm is %v, lastIncludedIndex is %v", rf.me, rf.state, rf.currentTerm, rf.commitIndex, rf.lastApplied, rf.getFirstLog(), rf.getLastLog(), lastIncludedTerm, lastIncludedIndex)
-	return true
-}
-
-// the service says it has created a snapshot that has
-// all info up to and including index. this means the
-// service no longer needs the log through (and including)
-// that index. Raft should now trim its log as much as possible.
-func (rf *Raft) Snapshot(index int, snapshot []byte) {
-	// Your code here (2D).
-
 }
 
 //使用 Raft 的服务（例如一个 k/v 服务器）想要就下一个要附加到 Raft 日志的命令开始协议。
@@ -246,8 +220,18 @@ func (rf *Raft) Start(command interface{}) (int, int, bool) {
 	index := -1
 	term := -1
 	isLeader := true
-
 	// Your code here (2B).
+	term, isLeader = rf.GetState()
+	if isLeader {
+		rf.mu.Lock()
+		index = rf.getLastLog().Index + 1
+		rf.logs = append(rf.logs, LogEntry{Command: command, Term: term, Index: index})
+		rf.matchIndex[rf.me] = index
+		rf.nextIndex[rf.me] = index + 1
+		DPrintf("{Node %v} receives a new command[%v] to replicate in term %v", rf.me, command, rf.currentTerm)
+		rf.BroadcastHeartbeat(false)
+		rf.mu.Unlock()
+	}
 
 	return index, term, isLeader
 }
@@ -280,6 +264,7 @@ func (rf *Raft) BroadcastHeartbeat(isHeartBeat bool) {
 		}
 		if isHeartBeat {
 			// need sending at once to maintain leadership
+			//对于 heartbeat timeout 触发的 BroadcastHeartbeat，我们需要立即发出日志同步请求而不是让 replicator 去发。
 			go rf.replicateOneRound(peer)
 		} else {
 			// just signal replicator goroutine to send entries in batch
