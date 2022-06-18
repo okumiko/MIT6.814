@@ -1,37 +1,25 @@
 package raft
 
-import (
-	"6.824/labgob"
-	"bytes"
-)
-
 // the service says it has created a snapshot that has
 // all info up to and including index. this means the
 // service no longer needs the log through (and including)
 // that index. Raft should now trim its log as much as possible.
 //删除掉对应已经被压缩的 raft log 即可，index是快照里最后一个log的index
-func (rf *Raft) Snapshot(index int, snapshot []byte) {
+//本节点生成快照，输入：新的快照index，以及快照logs
+func (rf *Raft) Snapshot(newSnapshotIndex int, snapshot []byte) {
 	rf.mu.Lock()
 	defer rf.mu.Unlock()
+
 	snapshotIndex := rf.getFirstLog().Index
-	if index <= snapshotIndex {
-		DPrintf("{Node %v} rejects replacing log with snapshotIndex %v as current snapshotIndex %v is larger in term %v", rf.me, index, snapshotIndex, rf.currentTerm)
+	if newSnapshotIndex <= snapshotIndex { //输入的index太早，返回
+		DPrintf("{Node %v} rejects replacing log with snapshotIndex %v as current snapshotIndex %v is larger in term %v", rf.me, newSnapshotIndex, snapshotIndex, rf.currentTerm)
 		return
 	}
-	rf.logs = shrinkEntriesArray(rf.logs[index-snapshotIndex:])
-	rf.logs[0].Command = nil
-	//保存节点状态和快照
-	rf.persister.SaveStateAndSnapshot(rf.encodeState(), snapshot)
-	DPrintf("{Node %v}'s state is {state %v,term %v,commitIndex %v,lastApplied %v,firstLog %v,lastLog %v} after replacing log with snapshotIndex %v as old snapshotIndex %v is smaller", rf.me, rf.state, rf.currentTerm, rf.commitIndex, rf.lastApplied, rf.getFirstLog(), rf.getLastLog(), index, snapshotIndex)
-}
-
-func (rf *Raft) encodeState() []byte {
-	w := new(bytes.Buffer)
-	e := labgob.NewEncoder(w)
-	e.Encode(rf.currentTerm)
-	e.Encode(rf.votedFor)
-	e.Encode(rf.logs)
-	return w.Bytes()
+	//删除两个index间的日志
+	rf.logs = shrinkEntriesArray(rf.logs[newSnapshotIndex-snapshotIndex:])
+	rf.logs[0].Command = nil                                      //logs[0]保存快照index和term
+	rf.persister.SaveStateAndSnapshot(rf.encodeState(), snapshot) //保存节点状态和快照
+	DPrintf("{Node %v}'s state is {state %v,term %v,commitIndex %v,lastApplied %v,firstLog %v,lastLog %v} after replacing log with snapshotIndex %v as old snapshotIndex %v is smaller", rf.me, rf.state, rf.currentTerm, rf.commitIndex, rf.lastApplied, rf.getFirstLog(), rf.getLastLog(), newSnapshotIndex, snapshotIndex)
 }
 
 type InstallSnapshotArgs struct {
@@ -53,6 +41,7 @@ func (rf *Raft) sendInstallSnapshot(server int, args *InstallSnapshotArgs, reply
 	return ok
 }
 
+//InstallSnapshot RPC：通过leader调用，发送快照的分块给follower。leader将分块按顺序发送。
 func (rf *Raft) InstallSnapshot(args *InstallSnapshotArgs, reply *InstallSnapshotReply) {
 	rf.mu.Lock()
 	defer rf.mu.Unlock()
@@ -114,6 +103,7 @@ func (rf *Raft) handleInstallSnapshotResponse(server int, args *InstallSnapshotA
 //对于服务上层触发的 CondInstallSnapshot，与上面类似，如果 snapshot 没有更新的话就没有必要去换，否则就接受对应的 snapshot 并处理对应状态的变更。
 //注意，这里不需要判断 lastIncludeIndex 和 lastIncludeTerm 是否匹配，因为 follower 对于 leader 发来的更新的 snapshot 是无条件服从的。
 //lastInclude是指快照里最新的log
+//跟随着收到InstallSnapshot RPC后，在通过向channel发送快照消息异步应用到状态机
 func (rf *Raft) CondInstallSnapshot(lastIncludedTerm int, lastIncludedIndex int, snapshot []byte) bool {
 	rf.mu.Lock()
 	defer rf.mu.Unlock()

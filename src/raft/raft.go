@@ -277,3 +277,12 @@ func (rf *Raft) Broadcast(isHeartBeat bool) {
 		}
 	}
 }
+
+func (rf *Raft) encodeState() []byte {
+	w := new(bytes.Buffer)
+	e := labgob.NewEncoder(w)
+	e.Encode(rf.currentTerm)
+	e.Encode(rf.votedFor)
+	e.Encode(rf.logs)
+	return w.Bytes()
+}
