@@ -4,10 +4,12 @@ import "6.824/labrpc"
 import "crypto/rand"
 import "math/big"
 
-
 type Clerk struct {
 	servers []*labrpc.ClientEnd
 	// You will have to modify this struct.
+	leaderId  int64
+	clientId  int64 //clientId和commandId唯一确定一个命令，多次apply相同的命令不会应用而是直接返回
+	commandId int   //每个命令一个顺序递增的commandId。在没有明确收到服务端写入成功或失败之前是不能改变的
 }
 
 func nrand() int64 {
@@ -18,10 +20,12 @@ func nrand() int64 {
 }
 
 func MakeClerk(servers []*labrpc.ClientEnd) *Clerk {
-	ck := new(Clerk)
-	ck.servers = servers
-	// You'll have to add code here.
-	return ck
+	return &Clerk{
+		servers:   servers,
+		leaderId:  0,
+		clientId:  nrand(),
+		commandId: 0,
+	}
 }
 
 //
@@ -37,9 +41,7 @@ func MakeClerk(servers []*labrpc.ClientEnd) *Clerk {
 // arguments. and reply must be passed as a pointer.
 //
 func (ck *Clerk) Get(key string) string {
-
-	// You will have to modify this function.
-	return ""
+	return ck.c
 }
 
 //
@@ -61,4 +63,26 @@ func (ck *Clerk) Put(key string, value string) {
 }
 func (ck *Clerk) Append(key string, value string) {
 	ck.PutAppend(key, value, "Append")
+}
+
+func (ck *Clerk) Command(request *CommandRequest) string {
+	request.ClientId, request.CommandId = ck.clientId, ck.commandId
+	for { //可能发送前重新选举了，尝试循环重试
+		var response CommandResponse
+		if !ck.servers[ck.leaderId].Call("KVServer.Command", request, &response) || response.Err == ErrWrongLeader || response.Err == ErrTimeout {
+			ck.leaderId = (ck.leaderId + 1) % int64(len(ck.servers))
+		}
+		ck.commandId++ //TODO:这里考量是什么？
+		return response.Value
+	}
+}
+
+type CommandRequest struct {
+	ClientId  int64
+	CommandId int
+}
+type CommandResponse struct {
+	Value string
+	Err   Err
+	Op    Op
 }
