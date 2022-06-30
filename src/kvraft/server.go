@@ -11,13 +11,17 @@ import (
 
 const Debug = false
 
+type OperationContext struct {
+	commandId    int
+	LastResponse *CommandResponse
+}
+
 func DPrintf(format string, a ...interface{}) (n int, err error) {
 	if Debug {
 		log.Printf(format, a...)
 	}
 	return
 }
-
 
 type Op struct {
 	// Your definitions here.
@@ -26,7 +30,7 @@ type Op struct {
 }
 
 type KVServer struct {
-	mu      sync.Mutex
+	mu      sync.RWMutex
 	me      int
 	rf      *raft.Raft
 	applyCh chan raft.ApplyMsg
@@ -35,8 +39,12 @@ type KVServer struct {
 	maxraftstate int // snapshot if log grows this big
 
 	// Your definitions here.
-}
+	lastApplied int // record the lastApplied to prevent stateMachine from rollback
 
+	stateMachine   KVStateMachine                // KV stateMachine
+	lastOperations map[int64]OperationContext    // 通过记录与clientId相对应的最后一个commandId和响应来确定日志是否重复
+	notifyChans    map[int]chan *CommandResponse // notify client goroutine by applier goroutine to response
+}
 
 func (kv *KVServer) Get(args *GetArgs, reply *GetReply) {
 	// Your code here.
@@ -44,6 +52,10 @@ func (kv *KVServer) Get(args *GetArgs, reply *GetReply) {
 
 func (kv *KVServer) PutAppend(args *PutAppendArgs, reply *PutAppendReply) {
 	// Your code here.
+}
+
+func (kv *KVServer) isDuplicateRequest(clientId int64, commandId int) bool {
+	return kv.lastOperations[clientId].commandId == commandId
 }
 
 //

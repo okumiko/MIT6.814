@@ -286,3 +286,8 @@ func (rf *Raft) encodeState() []byte {
 	e.Encode(rf.logs)
 	return w.Bytes()
 }
+
+//Me lock before use
+func (rf *Raft) Me() int {
+	return rf.me
+}

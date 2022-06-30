@@ -80,6 +80,7 @@ func (ck *Clerk) Command(request *CommandRequest) string {
 type CommandRequest struct {
 	ClientId  int64
 	CommandId int
+	Op        Op
 }
 type CommandResponse struct {
 	Value string
