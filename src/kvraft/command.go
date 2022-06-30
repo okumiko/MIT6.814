@@ -6,10 +6,7 @@ import (
 )
 
 type Command struct {
-	request   *CommandRequest
-	Op        Op
-	ClientId  int64
-	CommandId int
+	*CommandRequest
 }
 
 func (kv *KVServer) Command(request *CommandRequest, response *CommandResponse) {
