@@ -23,7 +23,7 @@ func (st StateType) String() string {
 func (rf *Raft) becomeLeader() {
 	rf.state = StateLeader
 	rf.electionTimer.Stop()                                 //停止竞举定时器
-	rf.Broadcast(true)                                      //广播心跳
+	rf.broadcast(true)                                      //广播心跳
 	resetTimer(rf.heartbeatTimer, StableHeartbeatTimeout()) //重置心跳超时时间
 	DPrintf("[Node %v][Term %v] from %v to LEADER", rf.me, rf.currentTerm, rf.state)
 }

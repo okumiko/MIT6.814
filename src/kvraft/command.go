@@ -9,21 +9,23 @@ type Command struct {
 	*CommandRequest
 }
 
+//Command 服务端统一处理命令逻辑函数
 func (kv *KVServer) Command(request *CommandRequest, response *CommandResponse) {
 	defer DPrintf("{Node %v} processes CommandRequest %v with CommandResponse %v", kv.rf.Me(), request, response)
 	// return result directly without raft layer's participation if request is duplicated
 	kv.mu.RLock()
+	//读请求由于不改变系统的状态，重复执行多次是没问题的。
 	if request.Op != OpGet && kv.isDuplicateRequest(request.ClientId, request.CommandId) {
-		lastResponse := kv.lastOperations[request.ClientId].LastResponse
+		lastResponse := kv.lastOperations[request.ClientId].LastResponse //如果重复，用该操作的上一次操作结果直接拦截返回
 		response.Value, response.Err = lastResponse.Value, lastResponse.Err
 		kv.mu.RUnlock()
 		return
 	}
 	kv.mu.RUnlock()
-	// do not hold lock to improve throughput
-	// when KVServer holds the lock to take snapshot, underlying raft can still commit raft logs
+	//不要持有锁来提高吞吐量
+	//当KVServer持有锁以获取快照时，底层raft仍然可以提交raft日志
 	index, _, isLeader := kv.rf.Start(Command{request})
-	if !isLeader {
+	if !isLeader { //只有leader才能执行命令
 		response.Err = ErrWrongLeader
 		return
 	}
@@ -95,4 +97,16 @@ func (kv *KVServer) applier() {
 			}
 		}
 	}
+}
+func (kv *KVServer) getNotifyChan(commandIndex int) chan *CommandResponse {
+
+}
+func (kv *KVServer) needSnapshot() bool {
+
+}
+func (kv *KVServer) takeSnapshot(commandIndex int) {
+
+}
+func (kv *KVServer) restoreSnapshot(snapshot []byte) {
+
 }

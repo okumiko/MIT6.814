@@ -41,7 +41,10 @@ type KVServer struct {
 	// Your definitions here.
 	lastApplied int // record the lastApplied to prevent stateMachine from rollback
 
-	stateMachine   KVStateMachine                // KV stateMachine
+	stateMachine KVStateMachine // KV stateMachine
+	//考虑这样一个场景，客户端向服务端提交了一条日志，服务端将其在 raft 组中进行了同步并成功 commit，接着在 apply 后返回给客户端执行结果。
+	//然而不幸的是，该 rpc 在传输中发生了丢失，客户端并没有收到写入成功的回复。
+	//因此，客户端只能进行重试直到明确地写入成功或失败为止，这就可能会导致相同地命令被执行多次，从而违背线性一致性。
 	lastOperations map[int64]OperationContext    // 通过记录与clientId相对应的最后一个commandId和响应来确定日志是否重复
 	notifyChans    map[int]chan *CommandResponse // notify client goroutine by applier goroutine to response
 }
