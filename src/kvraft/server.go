@@ -53,7 +53,10 @@ func (kv *KVServer) Get(args *GetArgs, reply *GetReply) {
 	// Your code here.
 }
 
-func (kv *KVServer) PutAppend(args *PutAppendArgs, reply *PutAppendReply) {
+func (kv *KVServer) Put(args *PutArgs, reply *PutReply) {
+	// Your code here.
+}
+func (kv *KVServer) Append(args *AppendArgs, reply *AppendReply) {
 	// Your code here.
 }
 
@@ -106,11 +109,15 @@ func StartKVServer(servers []*labrpc.ClientEnd, me int, persister *raft.Persiste
 	kv.maxraftstate = maxraftstate
 
 	// You may need initialization code here.
+	kv.stateMachine = NewMemoryKV()
+	kv.notifyChans = make(map[int]chan *CommandResponse)
+	kv.lastOperations = make(map[int64]OperationContext)
 
 	kv.applyCh = make(chan raft.ApplyMsg)
 	kv.rf = raft.Make(servers, me, persister, kv.applyCh)
 
 	// You may need initialization code here.
 
+	go kv.applier()
 	return kv
 }
