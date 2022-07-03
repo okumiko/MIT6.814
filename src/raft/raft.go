@@ -7,6 +7,7 @@ import (
 	"time"
 )
 
+//Make
 // 服务或测试者想要创建一个 Raft 服务器。
 //所有 Raft 服务器（包括这个）的端口都在 peers[] 中。
 //此服务器的端口是 peers[me]。
@@ -36,7 +37,7 @@ func Make(peers []*labrpc.ClientEnd, me int,
 	// initialize from state persisted before a crash
 	rf.readPersist(persister.ReadRaftState())
 
-	DPrintf("[Make] <%v|%v> restart, logs: %v", rf.state, rf.me, rf.logs)
+	DPrintf("[Make]<Node %v> restart, logs: %v", rf.me, rf.logs)
 	rf.applyCond = sync.NewCond(&rf.mu)
 	lastLog := rf.getLastLog()
 	for i := 0; i < len(peers); i++ {
@@ -47,15 +48,16 @@ func Make(peers []*labrpc.ClientEnd, me int,
 			go rf.replicator(i)
 		}
 	}
-
 	// start ticker goroutine to start elections
 	go rf.ticker()
 
 	// start applier goroutine to push committed logs into applyCh exactly once
 	go rf.applier()
+
 	return rf
 }
 
+//Start
 //使用 Raft 的服务（例如一个 k/v 服务器）想要就下一个要附加到 Raft 日志的命令开始协议。
 //如果此服务器不是领导者，则返回 false。 否则启动协议并立即返回。
 //无法保证此命令将永远提交到 Raft 日志，因为领导者可能会失败或失去选举。
@@ -69,22 +71,21 @@ func (rf *Raft) Start(command interface{}) (int, int, bool) {
 	term, isLeader = rf.GetState()
 	if isLeader {
 		rf.mu.Lock()
-		index = rf.getLastLog().Index + 1
+		index = rf.getLastLog().Index + 1 //先加一，方便持久化
 		rf.logs = append(rf.logs, LogEntry{Command: command, Term: term, Index: index})
 		rf.persist()
 
 		rf.matchIndex[rf.me] = index
 		rf.nextIndex[rf.me] = index + 1
 		DPrintf("[Start] <Node %v> receives command: |%v| in term %v", rf.me, command, rf.currentTerm)
-		rf.broadcast(false)
+		rf.Broadcast(false)
 		rf.mu.Unlock()
 	}
 
 	return index, term, isLeader
 }
 
-// return currentTerm and whether this server
-// believes it is the leader.
+//GetState return currentTerm and whether this server believes it is the leader.
 func (rf *Raft) GetState() (int, bool) {
 	rf.mu.Lock()
 	defer rf.mu.Unlock()
@@ -95,7 +96,7 @@ func (rf *Raft) GetState() (int, bool) {
 	return term, isleader
 }
 
-//
+// Kill
 // the tester doesn't halt goroutines created by Raft after each test,
 // but it does call the Kill() method. your code can use killed() to
 // check whether Kill() has been called. the use of atomic avoids the
@@ -114,4 +115,12 @@ func (rf *Raft) Kill() {
 //Me lock before use
 func (rf *Raft) Me() int {
 	return rf.me
+}
+
+func (rf *Raft) GetRaftStateSize() int {
+	return rf.persister.RaftStateSize()
+}
+
+func (rf *Raft) Term() int {
+	return rf.currentTerm
 }

@@ -10,6 +10,16 @@ const (
 	OpAppend
 )
 
+var opMap = [...]string{
+	"GET",
+	"PUT",
+	"APPEND",
+}
+
+func (op Operation) String() string {
+	return opMap[op]
+}
+
 //Clerk 客户端
 type Clerk struct {
 	servers []*labrpc.ClientEnd //rpc客户端
@@ -51,7 +61,9 @@ func (ck *Clerk) Command(request *CommandRequest) string {
 		//3. rpc客户端没有收到服务端的回复
 		//TODO: 万一网络瘫痪了，无限重试？
 		var response CommandResponse
-		if !ck.servers[ck.leaderId].Call("KVServer.Command", request, &response) || response.Err == ErrWrongLeader || response.Err == ErrTimeout {
+		ok := ck.servers[ck.leaderId].Call("KVServer.Command", request, &response)
+		DPrintf("[Command]<clerk %v> command {Id: %v | Op: %v } response {%v}", ck.clientId, request.CommandId, request.Op, response.Err)
+		if !ok || response.Err == ErrWrongLeader || response.Err == ErrTimeout {
 			ck.leaderId = (ck.leaderId + 1) % int64(len(ck.servers)) //保存/尝试leaderId
 			continue
 		}

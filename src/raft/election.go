@@ -125,6 +125,7 @@ func (rf *Raft) replicateOneRound(peer int) {
 	prevLogIndex := rf.nextIndex[peer] - 1
 	DPrintf("[replicateOneRound] <%v|%v>'s <peer %v> preLogIndex: %v, localLog: %v", rf.state, rf.me, peer, prevLogIndex, rf.logs)
 	if prevLogIndex < rf.getFirstLog().Index { //preLogIndex比本地firstLog还小，说明无法通过本地日志恢复，只能用快照
+		DPrintf("[replicateOneRound]<Node %v|Term %v> use snapShot ", rf.me, rf.currentTerm)
 		args := &InstallSnapshotArgs{
 			Term:              rf.currentTerm,
 			LeaderId:          rf.me,

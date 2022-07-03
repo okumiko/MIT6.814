@@ -84,6 +84,7 @@ func (rf *Raft) needReplicating(peer int) bool {
 	defer rf.mu.RUnlock()
 
 	//leader本地的最高日志比已知要复制的最高日志index高，说明要增加要复制的日志
+	DPrintf("[needReplicating]<Term %v|%v %v><peer %v> mathcIndex %v localLastLogIndex %v", rf.currentTerm, rf.state.String(), rf.me, peer, rf.matchIndex[peer], rf.getLastLog().Index)
 	return rf.state == StateLeader && rf.matchIndex[peer] < rf.getLastLog().Index
 }
 
@@ -106,7 +107,7 @@ func (rf *Raft) ticker() {
 				defer rf.mu.Unlock()
 
 				if rf.state == StateLeader { //在选举之前：发送空的AppendEntries RPC(心跳)给所有的服务器，一段时间后重复发送来防止选举超时的发生
-					rf.broadcast(true)                                      //广播心跳
+					rf.Broadcast(true)                                      //广播心跳
 					resetTimer(rf.heartbeatTimer, StableHeartbeatTimeout()) //重置定时器时间
 				}
 			}()
@@ -158,7 +159,7 @@ func (rf *Raft) killed() bool {
 	return z == 1
 }
 
-func (rf *Raft) broadcast(isHeartBeat bool) {
+func (rf *Raft) Broadcast(isHeartBeat bool) {
 	for peer := range rf.peers {
 		if peer == rf.me {
 			continue
@@ -170,6 +171,7 @@ func (rf *Raft) broadcast(isHeartBeat bool) {
 		} else {
 			// just signal replicator goroutine to send entries in batch
 			rf.replicatorCond[peer].Signal()
+			DPrintf("[Broadcast]<Node %v|Term %v> peer %v replicator signal", rf.me, rf.currentTerm, peer)
 		}
 	}
 }

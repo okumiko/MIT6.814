@@ -47,8 +47,9 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 	rf.mu.Lock()
 	defer rf.mu.Unlock()
 	defer rf.persist() // execute before rf.mu.Unlock()
-	defer DPrintf("[AppendEntries] <<Node %v>: role %v,term %v,commitIndex %v,lastApplied %v,firstLog %v,lastLog %v> args: %v  reply: %v", rf.me, rf.state.String(), rf.currentTerm, rf.commitIndex, rf.lastApplied, rf.getFirstLog(), rf.getLastLog(), args, reply)
+	defer DPrintf("[AppendEntries]<Node %v｜Term %v>: role %v,commitIndex %v,lastApplied %v,firstLog %v,lastLog %v> args: %v  reply: %v", rf.me, rf.currentTerm, rf.state.String(), rf.commitIndex, rf.lastApplied, rf.getFirstLog(), rf.getLastLog(), args, reply)
 
+	DPrintf("[AppendEntries]<Node %v| Term %v> args {%v}", rf.me, rf.currentTerm, *args)
 	//如果参数term小于接收者的currentTerm，返回false,过期消息，拒绝复制
 	if args.Term < rf.currentTerm {
 		reply.Term, reply.Success = rf.currentTerm, false
@@ -188,16 +189,10 @@ func (rf *Raft) handleAppendEntriesResponse(server int, args *AppendEntriesArgs,
 //使用前上锁
 func (rf *Raft) matchLog(PrevLogTerm, PrevLogIndex int) bool {
 	//本地是否有term和index一样的log
-	for i := len(rf.logs) - 1; i >= 0; i-- {
-		if rf.logs[i].Term == PrevLogTerm && rf.logs[i].Index == PrevLogIndex {
-			return true
-		}
-		//index和term都是递增的
-		if rf.logs[i].Term < PrevLogTerm || rf.logs[i].Index < PrevLogIndex {
-			break
-		}
+	if PrevLogIndex > rf.getLastLog().Index || PrevLogIndex < rf.getFirstLog().Index { //大于本地最大日志，小于
+		return false
 	}
-	return false
+	return rf.getRelativeIndexLog(PrevLogIndex).Term == PrevLogTerm
 }
 
 //使用前上锁

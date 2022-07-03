@@ -10,8 +10,8 @@ type MemoryKV struct {
 	KV map[string]string
 }
 
-func NewMemoryKV() *MemoryKV {
-	return &MemoryKV{make(map[string]string)}
+func NewMemoryKV() MemoryKV {
+	return MemoryKV{make(map[string]string)}
 }
 
 func (memoryKV *MemoryKV) Get(key string) (string, Err) {
